@@ -42,7 +42,7 @@ type Llm = {
   }
 }
 
-const MOD_VERSION = '0.5.0'
+const MOD_VERSION = '0.5.1'
 
 const SERVER = 'mcp-memory-service'
 
@@ -868,6 +868,9 @@ const takeSnapshot = async ($: Snapper, jo: JanitorOptions, state: Relay, messag
       const r = await $.mcp.call(SERVER, 'memory_store', {
         content: clipHead(`Context snapshot "${name}" of ${project ?? 'no project'}, taken ${localStamp(now)}, file thriftquill/snapshots/${file}:\n${body}`, 3000),
         metadata: { tags: ['snapshot', 'thriftquill', ...(project === undefined ? [] : [project])].join(','), type: 'observation' },
+        // Snapshots of one conversation read alike; each is its own point in time, so the service's semantic dedup must
+        // not drop it (an exact repeat is still refused).
+        conversation_id: `snapshot-${file}`,
       })
 
       memory = `memory copy ${storeVerdict(r)}`

@@ -1,6 +1,6 @@
 {
   "name": "thriftquill",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Saves tokens and limits: archives big old tool output before a compaction, compacts while the prompt cache is still warm, stops repeated skill and tool listings from being resent, moves tool descriptions behind ToolSearch, and takes context snapshots you can restore in another chat",
   "author": {
     "name": "Artyom"
