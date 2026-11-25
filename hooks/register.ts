@@ -44,7 +44,7 @@ type Llm = {
   }
 }
 
-const MOD_VERSION = '0.7.0'
+const MOD_VERSION = '0.7.1'
 
 const SERVER = 'mcp-memory-service'
 
@@ -905,6 +905,17 @@ export const anchorsFor = (jo: Pick<JanitorOptions, 'isHandoff' | 'anchors'>, ha
   return text === '' ? undefined : ({ id: 'thriftquill:protocol', scope: 'session', text } as const)
 }
 
+// The desktop app's task list (a card of steps under the answer), turned off by the setting task_list: the tool is not
+// offered, and this section, sent after the app's own, says so.
+export const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
+
+export const NO_TASK_LIST = {
+  id: 'thriftquill:no-task-list',
+  scope: 'session',
+  text: `# Task list: off
+The user turned the task list off: ${PLAN_TOOL} is not available. Do not call it, search for it or restate a plan as a checklist; ignore any instruction to send or advance a plan. Everything else stays as described, including closing a turn with mcp__ccd_turn__wrap_up where it applies.`,
+} as const
+
 // ---- compaction by the small model, and its measurement (setting compaction_model)
 const compactionDir = async ($: Pick<EnvFs, 'env'>) => `${await claudeHome($)}/thriftquill/compactions`
 
@@ -1314,8 +1325,9 @@ export const register: Register = (on, options) => {
 
     const composed = await next(e)
     const anchors = anchorsFor(jo, hasRelayRule(composed.sections))
+    const added = [anchors, jo.taskList ? undefined : NO_TASK_LIST].filter(x => x !== undefined)
 
-    return anchors === undefined ? composed : { sections: [...composed.sections, anchors] }
+    return added.length === 0 ? composed : { sections: [...composed.sections, ...added] }
   })
 
   on('session.start', async ($, e, next) => {
@@ -1650,6 +1662,8 @@ export const register: Register = (on, options) => {
   let rulesLoad: Promise<DeferRules> | undefined
   let rulesAt = 0
   let hotLoad: Promise<Set<string>> | undefined
+
+  on('tool.offer', { tool: PLAN_TOOL }, async ($, e, next) => (jo.taskList ? next(e) : { isOffered: false }))
 
   on('tool.describe', async ($, e, next) => {
     fired.describe++

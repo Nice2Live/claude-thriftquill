@@ -35,6 +35,7 @@ export type JanitorOptions = {
   snapshotMemory: boolean
   compactionModel: CompactionModel
   boundaryWindowTokens: number
+  taskList: boolean
 }
 
 export const DEFAULTS: JanitorOptions = {
@@ -57,6 +58,7 @@ export const DEFAULTS: JanitorOptions = {
   snapshotMemory: true,
   compactionModel: 'session',
   boundaryWindowTokens: 70000,
+  taskList: true,
 }
 
 const num = (v: unknown, fallback: number, min: number, max: number) =>
@@ -83,6 +85,7 @@ export const readOptions = (o: PluginOptions): JanitorOptions => ({
   snapshotMemory: o.snapshot_memory !== false,
   compactionModel: o.compaction_model === 'compare' ? 'compare' : o.compaction_model === 'small' ? 'small' : 'session',
   boundaryWindowTokens: num(o.boundary_window_tokens, DEFAULTS.boundaryWindowTokens, 0, 300000),
+  taskList: o.task_list !== false,
 })
 
 export const tokens = (chars: number) => Math.ceil(chars / 4)
