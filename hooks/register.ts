@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CoreEngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { agentsNote, archivePath, atWork, boundaryStep, decide, describePlan, idleStep, instructionsFor, k, maskDecision, planStubs, readOptions, tokens } from './janitor'
+import { archivePath, boundaryStep, decide, describePlan, idleStep, instructionsFor, k, maskDecision, planStubs, readOptions, tokens } from './janitor'
 import type { Gate, JanitorOptions } from './janitor'
 import { fmtSaved, LEDGER_ROWS, ledgerRow, summarizeLedger } from './ledger'
 import { applyShape, charsCut, planShape } from './shape'
@@ -11,6 +11,8 @@ import type { SnapMessage, TqPane, TqTab } from './snapshot'
 import { compactionReport, costOf, coverage, keepFrom, keyTerms, parseRows, SMALL_COMPACT_SYSTEM, SMALL_INPUT_CHARS, SUMMARY_PREFACE, clipSummary, summaryMessage } from './compaction'
 import type { CompactionRow, Usage } from './compaction'
 import { suggestRules } from './suggest'
+import { addEntry, asWorklog, backgroundStart, clipReport, closeStage, DIGEST_SYSTEM, EMPTY_WORKLOG, noticeTitle, patchEntry, renderWorklog, REPORT_CHARS, stageEnd } from './worklog'
+import type { WorkEntry, Worklog } from './worklog'
 import { clipHead, clipTail } from './text'
 import type { LedgerKind, LedgerRow } from './ledger'
 
@@ -42,7 +44,7 @@ type Llm = {
   }
 }
 
-const MOD_VERSION = '0.6.0'
+const MOD_VERSION = '0.7.0'
 
 const SERVER = 'mcp-memory-service'
 
@@ -981,6 +983,83 @@ const measureCompaction = async (
     : `compaction measured: engine ${usdText(engineCost)} vs small ${usdText(smallCost)} — Thriftquill pane, Reports, Compactions`
 }
 
+// ---- the work log (worklog.ts), kept per session in the store so a reload of the mod does not lose it
+let worklog: Worklog = EMPTY_WORKLOG
+
+// The origins of a turn the person started: their own message, from any surface.
+const PERSON_KINDS = new Set(['composer', 'bridge', 'sdk', 'channel'])
+
+const worklogKey = async ($: CoreEngineInterface) => `worklog:${(await $.session.id()).slice(0, 8)}`
+
+const saveWorklog = async ($: CoreEngineInterface) => {
+  await $.store.set(await worklogKey($), worklog).catch(() => undefined)
+}
+
+const loadWorklog = async ($: CoreEngineInterface): Promise<Worklog> => asWorklog(await $.store.get(await worklogKey($)).catch(() => undefined))
+
+const noteStart = async ($: CoreEngineInterface, x: { id: string; kind: WorkEntry['kind']; title: string }) => {
+  worklog = addEntry(worklog, { ...x, title: x.title.slice(0, 140) || x.kind, started: new Date().toISOString(), status: 'running' })
+  await saveWorklog($)
+}
+
+// The small model's digest of a long report replaces the clipped one; the full text stays in its file.
+const digestReport = async ($: CoreEngineInterface, id: string, text: string) => {
+  const r = await callModel($, 'digest', { model: MEMORY_MODEL, system: DIGEST_SYSTEM, prompt: clipHead(text, 60000), maxTokens: 800, timeoutMs: 60000 }).catch(() => undefined)
+  const digest = r?.isAnswered === true ? (r.text ?? '').trim() : ''
+
+  if (digest.length > 50) {
+    worklog = patchEntry(worklog, id, { report: clipReport(digest) })
+    await saveWorklog($)
+  }
+}
+
+const DIGEST_FROM = 2000
+
+// What a piece of work handed back: clipped into the log, the whole text to a file when it is long.
+const noteReport = async ($: CoreEngineInterface, x: { id: string; kind: WorkEntry['kind']; title?: string; status: WorkEntry['status']; text: string }) => {
+  const now = new Date().toISOString()
+  let file: string | undefined
+
+  if (x.text.length > REPORT_CHARS) {
+    const rel = `thriftquill/worklog/${(await $.session.id()).slice(0, 8)}-${x.id.replace(/[^\w-]/g, '').slice(0, 40)}.md`
+
+    file = await $.fs.write(`${await claudeHome($)}/${rel}`, x.text).then(
+      () => rel,
+      () => undefined,
+    )
+  }
+
+  const patch = { status: x.status, ended: now, report: clipReport(x.text), file }
+
+  worklog = worklog.entries.some(w => w.id === x.id)
+    ? patchEntry(worklog, x.id, patch)
+    : addEntry(worklog, { id: x.id, kind: x.kind, title: (x.title ?? x.id).slice(0, 140), started: now, ...patch })
+  await saveWorklog($)
+
+  if (x.text.length > DIGEST_FROM) {
+    $.clock.after(0, async () => {
+      await digestReport($, x.id, x.text).catch(() => undefined)
+    })
+  }
+}
+
+// A task notification: it closes the background task of the log it names (or the only one running); an agent's is
+// already logged at agent.report; anything else is noted as it came.
+const noteNotice = async ($: CoreEngineInterface, text: string) => {
+  if (worklog.entries.some(w => w.kind === 'agent' && text.includes(w.id))) {
+    return
+  }
+
+  const title = noticeTitle(text)
+  const status = /<status>\s*(failed|killed|stopped|error)/i.test(text) ? 'failed' : 'completed'
+  const open = worklog.entries.filter(w => w.status === 'running' && w.kind === 'task')
+  const low = text.toLowerCase()
+  const match = open.find(w => low.includes(w.title.toLowerCase().slice(0, 40))) ?? (open.length === 1 ? open[0] : undefined)
+  const body = text.replace(/<[^>]+>/g, ' ').replace(/[ \t]+/g, ' ').trim()
+
+  await noteReport($, { id: match?.id ?? `notice-${Date.now().toString(36)}`, kind: match === undefined ? 'notice' : 'task', title, status: match === undefined ? 'noted' : status, text: body })
+}
+
 // What /janitor does, for the command and the pane's buttons alike (the engine hands $ to top-level functions only).
 type JanitorLive = { jo: JanitorOptions; gate: Gate; relay: Relay; fired: { submit: number; compose: number } & Record<string, number> }
 
@@ -1031,6 +1110,10 @@ const janitorCommand = async ($: CoreEngineInterface, live: JanitorLive, rawArgs
     const lines = (await $.fs.read(await compactionLog($)).catch(() => '')).split('\n').filter(Boolean)
 
     return { text: compactionReport(parseRows(lines)) }
+  }
+
+  if (rawArgs.trim() === 'worklog') {
+    return { text: renderWorklog(worklog) ?? 'The work log is empty: nothing was handed off to agents or background tasks in this stage.' }
   }
 
   // The tail of the trace file: what the hooks did last, for the person and for whoever debugs the mod.
@@ -1181,7 +1264,7 @@ const startSnapshot = async ($: CoreEngineInterface, jo: JanitorOptions, relay: 
   return `snapshot "${name}" is being written (about half a minute); /snap shows it`
 }
 
-const TQ_REPORTS: Record<string, string> = { plan: 'Compaction plan', stats: 'Savings and cost', doctor: 'Health', trace: 'Trace', probe: 'Model check', compactions: 'Compactions: engine vs small model', tools: 'Tool sizes', suggest: 'Suggested tool rules' }
+const TQ_REPORTS: Record<string, string> = { plan: 'Compaction plan', stats: 'Savings and cost', doctor: 'Health', trace: 'Trace', probe: 'Model check', compactions: 'Compactions: engine vs small model', worklog: 'Work log of this stage', tools: 'Tool sizes', suggest: 'Suggested tool rules' }
 
 // A /janitor or /tools report drawn in the pane's Reports tab instead of the chat.
 const reportInTq = async ($: CoreEngineInterface, live: JanitorLive, usedNow: ReadonlySet<string>, kind: string): Promise<{ placed: boolean; text: string }> => {
@@ -1204,8 +1287,10 @@ const reportInTq = async ($: CoreEngineInterface, live: JanitorLive, usedNow: Re
 export const register: Register = (on, options) => {
   const jo = readOptions(options)
   const gate: Gate = { isForced: false }
-  // How many agents the last deferred compaction waited for: logged once per change, not at every turn.
-  let agentWaitLogged: number | undefined
+  // The turn now running: who started it, whether it handed work off, whether it ended a stage (and why).
+  let turnFlags: { byPerson: boolean; delegated: boolean; stageEnd?: string } = { byPerson: false, delegated: false }
+  // A due compaction waiting for the end of a stage: logged once, not at every turn.
+  let boundaryWaitLogged = false
   let turnStart: Snap | undefined
   let lastPrompt: string | undefined
   let spent: Spent = { five: 0, seven: 0 }
@@ -1254,6 +1339,8 @@ export const register: Register = (on, options) => {
         // no breakdown here: nothing to record
       }
     })
+
+    worklog = await loadWorklog($)
 
     // A compaction whose report was not shown yet (the mod was reloaded in between) is still owed.
     try {
@@ -1347,6 +1434,14 @@ export const register: Register = (on, options) => {
 
     turnStart = toSnap(usageNow)
     lastPrompt = e.text
+    // A message typed while a turn runs fires here at Enter, with that turn's id: the running turn keeps its flags.
+    if (e.turnId === undefined) {
+      turnFlags = { byPerson: PERSON_KINDS.has(e.origin.kind), delegated: false }
+    }
+
+    if (e.origin.kind === 'task-notification') {
+      await noteNotice($, e.text)
+    }
 
     // How the shadow signal fared: the person is back, the cache is warm or went cold in the meantime.
     const gap = lastCall === undefined ? undefined : Math.floor((Date.now() - lastCall) / 60000)
@@ -1365,6 +1460,9 @@ export const register: Register = (on, options) => {
     lastCall = Date.now()
 
     const asks: string[] = relay.items.splice(0)
+
+    // After any compaction the work log goes back to the model with this message, whatever the summary kept of it.
+    const logBlock = pending === undefined ? undefined : renderWorklog(worklog)
 
     if (pending !== undefined) {
       const p = pending
@@ -1402,7 +1500,11 @@ export const register: Register = (on, options) => {
       await trace($, `relay: ${asks.length} item(s) handed to the model`)
     }
 
-    const added = [restored, handed].filter((x): x is string => x !== undefined)
+    if (logBlock !== undefined) {
+      await trace($, `worklog: ${worklog.entries.length} item(s) handed back after the compaction`)
+    }
+
+    const added = [restored, handed, logBlock].filter((x): x is string => x !== undefined)
 
     return added.length === 0 ? next(e) : next({ ...e, context: [...(e.context ?? []), ...added] })
   })
@@ -1435,19 +1537,27 @@ export const register: Register = (on, options) => {
     if (e.agentId === undefined && !e.isAborted) {
       const cold = coldOwed
       const due = cold ? 'compact' : decide(usage.context.tokens, jo, gate)
-      const busy = due === 'none' || cold ? [] : atWork(await $.agent.list().catch(() => []))
-      const step = cold ? due : boundaryStep(due, usage.context.tokens, busy.length, jo)
+      const flags = turnFlags
+      const isBoundary = flags.stageEnd !== undefined || (flags.byPerson && !flags.delegated && e.reason === 'answer')
+      const step = cold ? due : boundaryStep(due, usage.context.tokens, isBoundary, jo)
 
       coldOwed = false
+      turnFlags = { byPerson: false, delegated: false }
+
+      if (flags.stageEnd !== undefined) {
+        worklog = closeStage(worklog, new Date().toISOString(), flags.stageEnd)
+        await saveWorklog($)
+      }
 
       if (step === 'wait') {
-        if (agentWaitLogged !== busy.length) {
-          agentWaitLogged = busy.length
-          $.ui.log(`janitor: context ${k(usage.context.tokens ?? 0)} ≥ threshold ${k(jo.thresholdTokens)}, waiting for ${busy.length} agent(s) at work to report`)
-          await trace($, `compact deferred: ${busy.length} agent(s) at work — ${busy.map(a => a.description).join('; ').slice(0, 200)}`)
+        if (!boundaryWaitLogged) {
+          boundaryWaitLogged = true
+          $.ui.log(`janitor: context ${k(usage.context.tokens ?? 0)} ≥ threshold ${k(jo.thresholdTokens)}: compacting at the end of this stage, at the latest at ${k(jo.thresholdTokens + jo.boundaryWindowTokens)}`)
+          await trace($, `compact deferred to a stage end: ${k(usage.context.tokens ?? 0)}, window to ${k(jo.thresholdTokens + jo.boundaryWindowTokens)}`)
         }
       } else if (step !== 'none') {
-        agentWaitLogged = undefined
+        boundaryWaitLogged = false
+        await trace($, `compact at ${flags.stageEnd ?? (isBoundary ? 'a reply to the person' : 'the top of the window')}`)
         gate.lastAttemptTokens = usage.context.tokens
 
         try {
@@ -1619,6 +1729,21 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     fired.toolCall++
 
+    if (e.agentId === undefined) {
+      const input = e as unknown as Record<string, unknown>
+      const end = stageEnd(e.tool, input)
+      const bg = backgroundStart(e.tool, input)
+
+      if (end !== undefined) {
+        turnFlags = { ...turnFlags, stageEnd: end }
+      }
+
+      if (bg !== undefined) {
+        turnFlags = { ...turnFlags, delegated: true }
+        await noteStart($, { id: `task-${Date.now().toString(36)}`, kind: 'task', title: bg })
+      }
+    }
+
     if (!usedNow.has(e.tool)) {
       usedNow = new Set([...usedNow, e.tool])
 
@@ -1635,6 +1760,28 @@ export const register: Register = (on, options) => {
   // Before the engine summarizes: the big outputs older than the last few messages go to disk and are replaced by
   // one-line stubs, so the summary is cheaper and points at where the full text lives. Shadow mode touches nothing.
   // After any real compaction the model has forgotten what it was told: the engine announces the catalogs again.
+
+  // The work log: an agent the main loop starts, and the report it hands back (agents of agents report to their parent).
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+
+    if (e.parentAgentId === undefined && 'agentId' in r && typeof r.agentId === 'string') {
+      turnFlags = { ...turnFlags, delegated: true }
+      await noteStart($, { id: r.agentId, kind: 'agent', title: `${e.subagentType}: ${e.description}` })
+    }
+
+    return r
+  })
+
+  on('agent.report', async ($, e, next) => {
+    const r = await next(e)
+
+    if (e.parentAgentId === undefined) {
+      await noteReport($, { id: e.agentId, kind: 'agent', title: e.subagentType, status: e.status, text: e.text }).catch(() => undefined)
+    }
+
+    return r
+  })
 
   on('session.compact', async ($, e, next) => {
     fired.compact++
@@ -1676,8 +1823,8 @@ export const register: Register = (on, options) => {
       }
     }
 
-    // The subagents so far, for the summary to keep what each one did.
-    const agentText = agentsNote(await $.agent.list().catch(() => []))
+    // The work log, for the summary to keep what each agent and task did.
+    const agentText = renderWorklog(worklog, 6000) ?? ''
 
     // From here the report is owed whatever the engine does with the call.
     const owed: Pending = { trigger: `${e.trigger}${isActive ? '' : ', shadow mode'}`, archived: prepared?.count ?? 0, saved: prepared?.saved ?? 0 }
@@ -1809,7 +1956,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const kind = args === '' ? 'plan' : args
 
-    if (['plan', 'stats', 'doctor', 'trace', 'probe', 'compactions'].includes(kind)) {
+    if (['plan', 'stats', 'doctor', 'trace', 'probe', 'compactions', 'worklog'].includes(kind)) {
       const { placed, text } = await reportInTq($, { jo, gate, relay, fired }, usedNow, kind)
 
       return placed ? {} : { text }

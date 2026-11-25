@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { agentsNote, atWork, boundaryStep, DEFAULTS, decide, describePlan, idleStep, instructionsFor, planStubs, maskDecision, readOptions, stubText } from './janitor'
+import { boundaryStep, DEFAULTS, decide, describePlan, idleStep, instructionsFor, planStubs, maskDecision, readOptions, stubText } from './janitor'
 
 const BIG = 'first line of output\n' + 'x'.repeat(8000)
 const OPTS = { ...DEFAULTS, ownTriggers: true, keepRecentMessages: 2, stubMinChars: 2000, idleMode: 'active' as const }
@@ -166,30 +166,17 @@ test('maskDecision: only in hybrid style, and only when the stubs alone cut enou
   expect(maskDecision(300000, 290000, { compactionStyle: 'summary' as const, maskMinCut: 40 })).toEqual('summary')
 })
 
-test('boundaryStep: a due compaction waits for agents at work, up to the ceiling', () => {
-  const o = { ...OPTS, thresholdTokens: 400000 }
-  const agents = [
-    { description: 'scan the repo', type: 'Explore', status: 'running' },
-    { description: 'write tests', type: 'general-purpose', status: 'completed' },
-    { description: 'teammate', type: 'x', status: 'idle' },
-  ]
+test('boundaryStep: past the threshold a compaction waits for a stage end, up to the top of the window', () => {
+  const o = { ...OPTS, thresholdTokens: 400000, boundaryWindowTokens: 70000 }
 
-  expect(atWork(agents).length).toEqual(1)
-  expect(boundaryStep('compact', 420000, 1, o)).toEqual('wait')
-  expect(boundaryStep('compact', 420000, 0, o)).toEqual('compact')
-  expect(boundaryStep('compact', 500000, 1, o)).toEqual('compact')
-  expect(boundaryStep('none', 420000, 3, o)).toEqual('none')
-  expect(boundaryStep('compact', 420000, 1, { ...o, waitForAgents: false })).toEqual('compact')
-  expect(readOptions({}).waitForAgents).toEqual(true)
-  expect(readOptions({ wait_for_agents: false }).waitForAgents).toEqual(false)
-})
-
-test('agentsNote lists the agents for the summary, and instructionsFor carries it', () => {
-  expect(agentsNote([])).toEqual('')
-
-  const note = agentsNote([{ description: 'scan\n the repo', type: 'Explore', status: 'running' }])
-
-  expect(note).toContain('- [running] Explore: scan the repo')
-  expect(instructionsFor(undefined, note)).toContain('Subagents of this session')
-  expect(instructionsFor(undefined)).not.toContain('Subagents')
+  expect(boundaryStep('compact', 420000, false, o)).toEqual('wait')
+  expect(boundaryStep('compact', 420000, true, o)).toEqual('compact')
+  expect(boundaryStep('compact', 470000, false, o)).toEqual('compact')
+  expect(boundaryStep('shadow', 420000, false, o)).toEqual('wait')
+  expect(boundaryStep('none', 420000, false, o)).toEqual('none')
+  expect(boundaryStep('compact', 420000, false, { ...o, boundaryWindowTokens: 0 })).toEqual('compact')
+  expect(readOptions({}).boundaryWindowTokens).toEqual(70000)
+  expect(readOptions({ boundary_window_tokens: 0 }).boundaryWindowTokens).toEqual(0)
+  expect(readOptions({ boundary_window_tokens: 999999 }).boundaryWindowTokens).toEqual(300000)
+  expect(instructionsFor(undefined, 'EXTRA')).toContain('EXTRA')
 })

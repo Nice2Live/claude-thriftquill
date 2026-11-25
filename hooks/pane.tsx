@@ -21,6 +21,7 @@ const REPORTS: readonly [string, string][] = [
   ['plan', 'Compaction'],
   ['tools', 'Tools'],
   ['compactions', 'Compactions'],
+  ['worklog', 'Work log'],
   ['doctor', 'Health'],
   ['trace', 'Trace'],
 ]

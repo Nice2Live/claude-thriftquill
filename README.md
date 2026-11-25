@@ -36,9 +36,13 @@ Or just ask Claude in any session: "install the thriftquill mod from Nice2Live/c
 
 `/snap` opens it. **Snapshots**: a name field and Take snapshot, every snapshot with Restore and View. **Reports**: Savings & cost, Compaction, Tools, Health, Trace. `/janitor …` and `/tools` reports open there instead of the chat; the per-answer cost line and the dedup lines go to the debug log.
 
-## Compacting at a threshold, at a good moment
+## Compacting at a threshold, at the end of a stage
 
-Turn on "Start compactions myself" (`own_triggers`) with Janitor mode `active`, and set "Compaction threshold" (`threshold_tokens`, 100k–900k): at the end of a turn where the context has reached it, the janitor compacts. With "Wait for agents at work" (`wait_for_agents`, on by default) a due compaction waits while subagents of the session are still running and runs at the end of the turn that takes their reports, so a stage is summarized whole; past 1.25 × the threshold it no longer waits. Every summary (this one, the engine's auto-compact, a `/compact`) is also given the list of the session's agents, with the instruction to keep what each one did.
+Turn on "Start compactions myself" (`own_triggers`) with Janitor mode `active`, and set "Compaction threshold" (`threshold_tokens`). Past the threshold a compaction waits, up to "Wait for a stage end" (`boundary_window_tokens`, 70k by default) more tokens, for the end of a stage: the task wrapped up, the plan or todo list done, a commit, or a reply to your own message that handed nothing off. At the top of that window it runs at the end of any turn. Keep threshold + window under the engine's own auto-compact.
+
+## Work log
+
+The mod keeps, outside the conversation, what the conversation handed off and what came back: each subagent (its task and its report), background commands, monitors and workflows, and the task notifications. Long reports are saved whole to `~/.claude/thriftquill/worklog/` and condensed by the small model (one call per report over 2000 characters). After every compaction (the janitor's, the engine's auto-compact, a `/compact`) the log of the current stage goes back to the model with the next message, and the summary is told to keep it, so a stage spread over agents is not forgotten halfway. A stage closes when it ends (as above); finished items then stay only as titles. Thriftquill pane → Reports → Work log shows it.
 
 ## Compaction by the small model (experimental)
 

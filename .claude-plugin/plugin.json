@@ -1,6 +1,6 @@
 {
   "name": "thriftquill",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Saves tokens and limits: archives big old tool output before a compaction, compacts while the prompt cache is still warm, stops repeated skill and tool listings from being resent, moves tool descriptions behind ToolSearch, and takes context snapshots you can restore in another chat",
   "author": {
     "name": "Artyom"
@@ -73,11 +73,13 @@
       "min": 100000,
       "max": 900000
     },
-    "wait_for_agents": {
-      "type": "boolean",
-      "title": "Wait for agents at work",
-      "description": "On (default): a compaction due at the threshold waits while subagents of the session are still running, and runs at the end of the turn that takes their reports; past 1.25 × the threshold it no longer waits. Every summary is also told which agents ran and to keep what each one did.",
-      "default": true
+    "boundary_window_tokens": {
+      "type": "number",
+      "title": "Wait for a stage end (tokens)",
+      "description": "Past the threshold, a compaction waits up to this many tokens more for the end of a stage: the task wrapped up, the plan or todo list done, a commit, or a reply to your own message that handed nothing off. At the top of the window it runs at the end of any turn. 0: compact at the threshold. Keep threshold + window under the engine's auto-compact.",
+      "default": 70000,
+      "min": 0,
+      "max": 300000
     },
     "keep_recent_messages": {
       "type": "number",
