@@ -8,6 +8,11 @@ export type OutputMode = 'off' | 'shadow' | 'active'
 // summary: every compaction makes a summary. hybrid: when the stubs alone cut enough, the conversation is kept as it is with the stubs in it.
 export type CompactionStyle = 'summary' | 'hybrid'
 
+// session: the engine compacts with the session's model. compare: it still does, and the small model writes its own summary
+// of the same conversation on the side, for cost and coverage. small: the small model writes the summary (the engine only
+// where it gives no answer).
+export type CompactionModel = 'session' | 'compare' | 'small'
+
 export type Mode = 'shadow' | 'active'
 
 export type JanitorOptions = {
@@ -28,6 +33,7 @@ export type JanitorOptions = {
   anchors: string
   snapshotOnCompact: boolean
   snapshotMemory: boolean
+  compactionModel: CompactionModel
 }
 
 export const DEFAULTS: JanitorOptions = {
@@ -48,6 +54,7 @@ export const DEFAULTS: JanitorOptions = {
   anchors: '',
   snapshotOnCompact: true,
   snapshotMemory: true,
+  compactionModel: 'session',
 }
 
 const num = (v: unknown, fallback: number, min: number, max: number) =>
@@ -72,6 +79,7 @@ export const readOptions = (o: PluginOptions): JanitorOptions => ({
   anchors: typeof o.anchors === 'string' ? o.anchors.slice(0, 4000) : '',
   snapshotOnCompact: o.snapshot_on_compact !== false,
   snapshotMemory: o.snapshot_memory !== false,
+  compactionModel: o.compaction_model === 'compare' ? 'compare' : o.compaction_model === 'small' ? 'small' : 'session',
 })
 
 export const tokens = (chars: number) => Math.ceil(chars / 4)

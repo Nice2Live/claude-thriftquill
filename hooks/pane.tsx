@@ -20,6 +20,7 @@ const REPORTS: readonly [string, string][] = [
   ['stats', 'Savings & cost'],
   ['plan', 'Compaction'],
   ['tools', 'Tools'],
+  ['compactions', 'Compactions'],
   ['doctor', 'Health'],
   ['trace', 'Trace'],
 ]

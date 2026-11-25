@@ -8,6 +8,8 @@ import { applyShape, charsCut, planShape } from './shape'
 import { TQ_PANE_ID, registerTqPane } from './pane'
 import { EMPTY_TQ_PANE, listSnapshots, localStamp, parseSnapArgs, pickSnapshot, pressOf, projectTag, restoreBlock, SNAPSHOT_SYSTEM, snapshotDoc, snapshotFile, transcriptOf } from './snapshot'
 import type { SnapMessage, TqPane, TqTab } from './snapshot'
+import { compactionReport, costOf, coverage, keepFrom, keyTerms, parseRows, SMALL_COMPACT_SYSTEM, SMALL_INPUT_CHARS, SUMMARY_PREFACE, clipSummary, summaryMessage } from './compaction'
+import type { CompactionRow, Usage } from './compaction'
 import { suggestRules } from './suggest'
 import { clipHead, clipTail } from './text'
 import type { LedgerKind, LedgerRow } from './ledger'
@@ -40,7 +42,7 @@ type Llm = {
   }
 }
 
-const MOD_VERSION = '0.4.0'
+const MOD_VERSION = '0.5.0'
 
 const SERVER = 'mcp-memory-service'
 
@@ -898,6 +900,84 @@ export const anchorsFor = (jo: Pick<JanitorOptions, 'isHandoff' | 'anchors'>, ha
   return text === '' ? undefined : ({ id: 'thriftquill:protocol', scope: 'session', text } as const)
 }
 
+// ---- compaction by the small model, and its measurement (setting compaction_model)
+const compactionDir = async ($: Pick<EnvFs, 'env'>) => `${await claudeHome($)}/thriftquill/compactions`
+
+const compactionLog = async ($: Pick<EnvFs, 'env'>) => `${await compactionDir($)}/compactions.jsonl`
+
+type SmallSummary = { text: string; usage?: Usage; seconds: number; inputChars: number }
+
+// The small model's summary of `messages`; undefined when it gives no usable answer.
+const smallSummary = async ($: Llm, messages: readonly SnapMessage[], instructions?: string): Promise<SmallSummary | undefined> => {
+  const prompt = transcriptOf(messages, SMALL_INPUT_CHARS)
+  const t0 = Date.now()
+  const r = await callModel($, 'compact', {
+    model: MEMORY_MODEL,
+    system: instructions === undefined || instructions.trim() === '' ? SMALL_COMPACT_SYSTEM : `${SMALL_COMPACT_SYSTEM}\n\nThe user also asked: ${instructions.trim()}`,
+    prompt,
+    maxTokens: 12000,
+    effort: MEMORY_EFFORT,
+    timeoutMs: 180000,
+  }).catch(() => undefined)
+  const text = r?.isAnswered === true ? (r.text ?? '').trim() : ''
+
+  return text.length < 500 ? undefined : { text: clipSummary(text), usage: r?.usage as Usage | undefined, seconds: (Date.now() - t0) / 1000, inputChars: prompt.length }
+}
+
+const usdText = (x: number | undefined) => (x === undefined ? '?' : `$${x.toFixed(x < 0.01 ? 4 : 3)}`)
+
+// One measured compaction: the summaries go to files, the numbers to compactions.jsonl.
+const recordCompaction = async ($: EnvFs, row: CompactionRow, engineText?: string, smallText?: string): Promise<CompactionRow> => {
+  const dir = await compactionDir($)
+  const stamp = row.t.slice(0, 19).replace(/[-:]/g, '').replace('T', '-')
+  const files: CompactionRow['files'] = {}
+
+  if (engineText !== undefined && engineText !== '') {
+    files.engine = `thriftquill/compactions/${stamp}-engine.md`
+    await $.fs.write(`${dir}/${stamp}-engine.md`, engineText)
+  }
+
+  if (smallText !== undefined && smallText !== '') {
+    files.small = `thriftquill/compactions/${stamp}-small.md`
+    await $.fs.write(`${dir}/${stamp}-small.md`, smallText)
+  }
+
+  const done = { ...row, files }
+  const path = await compactionLog($)
+  const old = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+
+  await $.fs.write(path, `${[...old.split('\n').filter(Boolean), JSON.stringify(done)].slice(-500).join('\n')}\n`)
+
+  return done
+}
+
+// Compare mode: the small model summarizes what the engine just summarized, and both are measured.
+const measureCompaction = async (
+  $: CoreEngineInterface,
+  c: { trigger: string; model: string; base: readonly SnapMessage[]; engineText: string; engineUsage?: Usage; limit5h?: number },
+): Promise<string> => {
+  const small = await smallSummary($, c.base)
+  const terms = keyTerms(transcriptOf(c.base, 2000000))
+  const engineCost = costOf(c.engineUsage, c.model)
+  const smallCost = small === undefined ? undefined : costOf(small.usage, MEMORY_MODEL)
+  const row: CompactionRow = {
+    t: new Date().toISOString(),
+    trigger: c.trigger,
+    mode: 'compare',
+    model: c.model,
+    messages: c.base.length,
+    engine: { usage: c.engineUsage, cost: engineCost, chars: c.engineText.length, coverage: coverage(terms, c.engineText), limit5h: c.limit5h },
+    small: small === undefined ? undefined : { usage: small.usage, cost: smallCost, chars: small.text.length, coverage: coverage(terms, small.text), seconds: small.seconds, inputChars: small.inputChars },
+  }
+
+  await recordCompaction($, row, c.engineText, small?.text)
+  await trace($, `compact measure: engine ${usdText(engineCost)}, small ${small === undefined ? 'no answer' : usdText(smallCost)}`)
+
+  return small === undefined
+    ? `compaction measured: engine ${usdText(engineCost)}; the small model gave no answer`
+    : `compaction measured: engine ${usdText(engineCost)} vs small ${usdText(smallCost)} — Thriftquill pane, Reports, Compactions`
+}
+
 // What /janitor does, for the command and the pane's buttons alike (the engine hands $ to top-level functions only).
 type JanitorLive = { jo: JanitorOptions; gate: Gate; relay: Relay; fired: { submit: number; compose: number } & Record<string, number> }
 
@@ -941,6 +1021,13 @@ const janitorCommand = async ($: CoreEngineInterface, live: JanitorLive, rawArgs
         `files: ${await claudeHome($)}/thriftquill/`,
       ].join('\n'),
     }
+  }
+
+  // The measured compactions: the engine's summary against the small model's (setting compaction_model).
+  if (rawArgs.trim() === 'compactions') {
+    const lines = (await $.fs.read(await compactionLog($)).catch(() => '')).split('\n').filter(Boolean)
+
+    return { text: compactionReport(parseRows(lines)) }
   }
 
   // The tail of the trace file: what the hooks did last, for the person and for whoever debugs the mod.
@@ -1091,7 +1178,7 @@ const startSnapshot = async ($: CoreEngineInterface, jo: JanitorOptions, relay: 
   return `snapshot "${name}" is being written (about half a minute); /snap shows it`
 }
 
-const TQ_REPORTS: Record<string, string> = { plan: 'Compaction plan', stats: 'Savings and cost', doctor: 'Health', trace: 'Trace', probe: 'Model check', tools: 'Tool sizes', suggest: 'Suggested tool rules' }
+const TQ_REPORTS: Record<string, string> = { plan: 'Compaction plan', stats: 'Savings and cost', doctor: 'Health', trace: 'Trace', probe: 'Model check', compactions: 'Compactions: engine vs small model', tools: 'Tool sizes', suggest: 'Suggested tool rules' }
 
 // A /janitor or /tools report drawn in the pane's Reports tab instead of the chat.
 const reportInTq = async ($: CoreEngineInterface, live: JanitorLive, usedNow: ReadonlySet<string>, kind: string): Promise<{ placed: boolean; text: string }> => {
@@ -1600,6 +1687,49 @@ export const register: Register = (on, options) => {
       }
     }
 
+    // Small mode: the small model writes the summary of all but the last messages, which stay as they are; where it gives
+    // no answer the engine compacts as usual.
+    if (jo.compactionModel === 'small') {
+      const base = prepared?.messages ?? e.messages
+      const cut = keepFrom(base, jo.keepRecentMessages)
+
+      if (cut >= 2) {
+        const head = base.slice(0, cut) as unknown as SnapMessage[]
+        const small = await smallSummary($, head, e.instructions)
+
+        if (small !== undefined) {
+          const before = (await $.session.usage()).context.tokens
+          const tail = base.slice(cut)
+          const after = tokens(SUMMARY_PREFACE.length + small.text.length + tail.reduce((n, m) => n + m.text.length, 0))
+          const model = await $.session.model().catch(() => '?')
+          const terms = keyTerms(transcriptOf(head, 2000000))
+
+          await recordCompaction($, {
+            t: new Date().toISOString(),
+            trigger: e.trigger,
+            mode: 'small',
+            model,
+            messages: base.length,
+            small: { usage: small.usage, cost: costOf(small.usage, MEMORY_MODEL), chars: small.text.length, coverage: coverage(terms, small.text), seconds: small.seconds, inputChars: small.inputChars },
+          }, undefined, small.text).catch(() => undefined)
+          await trace($, `compact: small model, ${cut} message(s) summarized in ${small.text.length} chars, ${tail.length} kept, ${small.seconds.toFixed(0)} s`)
+
+          if (prepared !== undefined) {
+            noteSaving('stub', prepared.saved, `${prepared.count} fragments`)
+          }
+
+          seen.delete('main')
+          gate.lastAttemptTokens = after
+          pending = { ...owed, before, after, summary: small.text }
+          await keepPending($, pending).catch(() => undefined)
+
+          return { messages: [summaryMessage(small.text), ...tail] as typeof e.messages, tokensBefore: before, tokensAfter: after }
+        }
+
+        await trace($, 'compact: the small model gave no answer, the engine compacts')
+      }
+    }
+
     const input =
       prepared === undefined
         ? isActive
@@ -1640,6 +1770,21 @@ export const register: Register = (on, options) => {
     pending = { ...owed, before: done.tokensBefore, after: done.tokensAfter, summary: summaryOf(done.messages), usageLine: fmtTurn(cost, spent) }
     await keepPending($, pending).catch(() => undefined)
 
+    // Compare: the small model summarizes the same conversation on the side; the engine's result stands.
+    if (jo.compactionModel === 'compare' && input.messages.length >= 4) {
+      const engineText = summaryOf(done.messages)
+      const engineUsage = ('usage' in done ? done.usage : undefined) as Usage | undefined
+      const base = input.messages as unknown as SnapMessage[]
+      const model = await $.session.model().catch(() => '?')
+      const limit5h = cost.five
+
+      $.clock.after(0, async () => {
+        const line = await measureCompaction($, { trigger: e.trigger, model, base, engineText, engineUsage, limit5h }).catch(err => `compaction measure failed — ${flat(String(err)).slice(0, 120)}`)
+
+        await $.ui.toast(line.slice(0, 160))
+      })
+    }
+
     return done
   })
 
@@ -1647,7 +1792,7 @@ export const register: Register = (on, options) => {
     const args = e.args.trim()
     const kind = args === '' ? 'plan' : args
 
-    if (['plan', 'stats', 'doctor', 'trace', 'probe'].includes(kind)) {
+    if (['plan', 'stats', 'doctor', 'trace', 'probe', 'compactions'].includes(kind)) {
       const { placed, text } = await reportInTq($, { jo, gate, relay, fired }, usedNow, kind)
 
       return placed ? {} : { text }

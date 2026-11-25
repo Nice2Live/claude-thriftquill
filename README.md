@@ -35,3 +35,13 @@ Or just ask Claude in any session: "install the thriftquill mod from Nice2Live/c
 ## The Thriftquill pane
 
 `/snap` opens it. **Snapshots**: a name field and Take snapshot, every snapshot with Restore and View. **Reports**: Savings & cost, Compaction, Tools, Health, Trace. `/janitor …` and `/tools` reports open there instead of the chat; the per-answer cost line and the dedup lines go to the debug log.
+
+## Compaction by the small model (experimental)
+
+Setting `compaction_model`:
+
+- `session` (default): the engine compacts with the model of the session, reading the conversation from the prompt cache.
+- `compare`: the same, and the small model (`claude-haiku-5-5`) writes its own summary of the same conversation on the side. The Thriftquill pane, Reports, **Compactions** shows for each compaction what both summaries cost (list prices) and how many of the conversation's key terms (file names, code spans) each kept; both summaries are saved to `~/.claude/thriftquill/compactions/` to read side by side.
+- `small`: the small model writes the summary and the last messages stay as they are; the engine compacts only where the small model gives no answer.
+
+Run `compare` for a while before choosing `small`: a summary is all that is left of the conversation after a compaction.
