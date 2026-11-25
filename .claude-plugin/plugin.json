@@ -1,0 +1,153 @@
+{
+  "name": "thriftquill",
+  "version": "0.4.0",
+  "description": "Saves tokens and limits: archives big old tool output before a compaction, compacts while the prompt cache is still warm, stops repeated skill and tool listings from being resent, moves tool descriptions behind ToolSearch, and takes context snapshots you can restore in another chat",
+  "author": {
+    "name": "Artyom"
+  },
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Janitor mode",
+      "description": "shadow: only log what a compaction would archive. active: compact at the threshold, archiving big old tool output first.",
+      "options": [
+        "shadow",
+        "active"
+      ],
+      "default": "shadow"
+    },
+    "own_triggers": {
+      "type": "boolean",
+      "title": "Start compactions myself",
+      "description": "off (default): the janitor starts no compaction of its own. It works on every compaction the engine runs (the auto-compact threshold, Claude Code's own idle compaction, a manual /compact): it archives big old tool output, adds the compaction priorities and stores the handoff. on: it also starts a compaction itself, at the threshold below, after the idle minutes, and for a cold cache.",
+      "default": false
+    },
+    "output_mode": {
+      "type": "string",
+      "title": "Big tool results",
+      "description": "A tool result longer than the cap below keeps its start and its end, and the whole text is saved to a file whose path the model is told. off: nothing is cut. shadow (default): the trace only says what would be cut. active: results are cut. An error result is never cut.",
+      "options": [
+        "off",
+        "shadow",
+        "active"
+      ],
+      "default": "shadow"
+    },
+    "output_cap_chars": {
+      "type": "number",
+      "title": "Cap for one tool result (characters)",
+      "description": "Results longer than this are cut when Big tool results is active. About four characters make a token.",
+      "default": 30000,
+      "min": 5000,
+      "max": 200000
+    },
+    "compaction_style": {
+      "type": "string",
+      "title": "Compaction style",
+      "description": "summary (default): every compaction makes a summary. hybrid (experimental): when archiving big old tool output and arguments alone takes at least the percentage below off the context, the conversation is kept as it is with stubs in it and no summary is made; otherwise a summary is made as usual.",
+      "options": [
+        "summary",
+        "hybrid"
+      ],
+      "default": "summary"
+    },
+    "mask_min_cut": {
+      "type": "number",
+      "title": "Hybrid: smallest cut (percent)",
+      "description": "Only used with the hybrid style. Stubs alone must take at least this share of the context off for the summary to be skipped.",
+      "default": 40,
+      "min": 20,
+      "max": 80
+    },
+    "handoff_rewrite": {
+      "type": "boolean",
+      "title": "Let the small model rewrite the handoff",
+      "description": "On (default): the small model turns the summary sections into a clean English note before storing it. Off: the sections are stored as they are, in the language of the conversation, with no model call.",
+      "default": true
+    },
+    "threshold_tokens": {
+      "type": "number",
+      "title": "Compaction threshold (tokens)",
+      "description": "Context size at the end of a turn from which the janitor acts. Only used while \"Start compactions myself\" is on.",
+      "default": 300000,
+      "min": 100000,
+      "max": 900000
+    },
+    "keep_recent_messages": {
+      "type": "number",
+      "title": "Recent messages left whole",
+      "description": "The last N messages are never stubbed.",
+      "default": 12,
+      "min": 4,
+      "max": 60
+    },
+    "stub_min_chars": {
+      "type": "number",
+      "title": "Smallest text to archive (characters)",
+      "description": "A tool result or argument shorter than this stays in the context as it is.",
+      "default": 2000,
+      "min": 500,
+      "max": 20000
+    },
+    "handoff": {
+      "type": "boolean",
+      "title": "Store the session summary in memory",
+      "description": "After an active compaction, store the summary in mcp-memory-service tagged session-handoff.",
+      "default": true
+    },
+    "idle_mode": {
+      "type": "string",
+      "title": "Compaction before the cache goes cold",
+      "description": "shadow: only say that a compaction would run while the prompt cache is still warm. active: run it. Independent of the mode above. Only used while \"Start compactions myself\" is on.",
+      "options": [
+        "shadow",
+        "active"
+      ],
+      "default": "shadow"
+    },
+    "idle_minutes": {
+      "type": "number",
+      "title": "Idle minutes before the cache goes cold",
+      "description": "Silence of this many minutes (the prompt cache holds an hour) and a big context: shadow mode logs that a compaction would run now, active mode runs it while the cache is still warm.",
+      "default": 50,
+      "min": 20,
+      "max": 58
+    },
+    "idle_min_tokens": {
+      "type": "number",
+      "title": "Smallest context worth compacting while idle (tokens)",
+      "description": "Under this size a cold restart is cheap and nothing is done.",
+      "default": 150000,
+      "min": 50000,
+      "max": 900000
+    },
+    "anchors": {
+      "type": "string",
+      "title": "Standing instructions (optional)",
+      "description": "Text added to the system prompt and kept after every compaction, e.g. a reply language or a tool preference. Empty adds nothing.",
+      "default": ""
+    },
+    "snapshot_on_compact": {
+      "type": "boolean",
+      "title": "Snapshot before every compaction",
+      "description": "On (default): before a compaction the small model writes a snapshot of the conversation to thriftquill/snapshots, so what the summary drops can be read back or restored with /restore.",
+      "default": true
+    },
+    "snapshot_memory": {
+      "type": "boolean",
+      "title": "Copy snapshots to memory",
+      "description": "On (default): a snapshot is also stored in mcp-memory-service with the tags snapshot and project:<folder>, so it is found from any session (mnemovale's start briefing uses it). Off: files only.",
+      "default": true
+    }
+  },
+  "license": "MIT",
+  "repository": "https://github.com/Nice2Live/claude-thriftquill",
+  "keywords": [
+    "tokens",
+    "context",
+    "compaction",
+    "prompt-cache",
+    "janitor"
+  ],
+  "types": "./types/index.d.ts"
+}

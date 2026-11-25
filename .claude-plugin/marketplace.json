@@ -1,0 +1,14 @@
+{
+  "name": "claude-thriftquill",
+  "owner": {
+    "name": "Artyom"
+  },
+  "description": "Saves tokens and limits in Claude Code; context snapshots you can restore in another chat",
+  "plugins": [
+    {
+      "name": "thriftquill",
+      "source": "./",
+      "description": "Saves tokens and limits in Claude Code; context snapshots you can restore in another chat"
+    }
+  ]
+}
