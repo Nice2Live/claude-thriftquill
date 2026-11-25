@@ -1,6 +1,6 @@
 {
   "name": "thriftquill",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Saves tokens and limits: archives big old tool output before a compaction, compacts while the prompt cache is still warm, stops repeated skill and tool listings from being resent, moves tool descriptions behind ToolSearch, and takes context snapshots you can restore in another chat",
   "author": {
     "name": "Artyom"
@@ -19,7 +19,7 @@
     "own_triggers": {
       "type": "boolean",
       "title": "Start compactions myself",
-      "description": "off (default): the janitor starts no compaction of its own. It works on every compaction the engine runs (the auto-compact threshold, Claude Code's own idle compaction, a manual /compact): it archives big old tool output, adds the compaction priorities and stores the handoff. on: it also starts a compaction itself, at the threshold below, after the idle minutes, and for a cold cache.",
+      "description": "off (default): the janitor starts no compaction of its own and only works on the compactions the engine runs (its auto-compact, a /compact). on: it also compacts at the end of a turn once the context reaches \"Compaction threshold\" (needs Janitor mode active; shadow only logs), and after a long silence (idle settings).",
       "default": false
     },
     "output_mode": {
@@ -68,10 +68,16 @@
     "threshold_tokens": {
       "type": "number",
       "title": "Compaction threshold (tokens)",
-      "description": "Context size at the end of a turn from which the janitor acts. Only used while \"Start compactions myself\" is on.",
+      "description": "Context size at the end of a turn from which the janitor compacts. Only used while \"Start compactions myself\" is on.",
       "default": 300000,
       "min": 100000,
       "max": 900000
+    },
+    "wait_for_agents": {
+      "type": "boolean",
+      "title": "Wait for agents at work",
+      "description": "On (default): a compaction due at the threshold waits while subagents of the session are still running, and runs at the end of the turn that takes their reports; past 1.25 × the threshold it no longer waits. Every summary is also told which agents ran and to keep what each one did.",
+      "default": true
     },
     "keep_recent_messages": {
       "type": "number",

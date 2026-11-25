@@ -36,6 +36,10 @@ Or just ask Claude in any session: "install the thriftquill mod from Nice2Live/c
 
 `/snap` opens it. **Snapshots**: a name field and Take snapshot, every snapshot with Restore and View. **Reports**: Savings & cost, Compaction, Tools, Health, Trace. `/janitor …` and `/tools` reports open there instead of the chat; the per-answer cost line and the dedup lines go to the debug log.
 
+## Compacting at a threshold, at a good moment
+
+Turn on "Start compactions myself" (`own_triggers`) with Janitor mode `active`, and set "Compaction threshold" (`threshold_tokens`, 100k–900k): at the end of a turn where the context has reached it, the janitor compacts. With "Wait for agents at work" (`wait_for_agents`, on by default) a due compaction waits while subagents of the session are still running and runs at the end of the turn that takes their reports, so a stage is summarized whole; past 1.25 × the threshold it no longer waits. Every summary (this one, the engine's auto-compact, a `/compact`) is also given the list of the session's agents, with the instruction to keep what each one did.
+
 ## Compaction by the small model (experimental)
 
 Setting `compaction_model`:

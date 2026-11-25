@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CoreEngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { archivePath, decide, describePlan, idleStep, instructionsFor, k, maskDecision, planStubs, readOptions, tokens } from './janitor'
+import { agentsNote, archivePath, atWork, boundaryStep, decide, describePlan, idleStep, instructionsFor, k, maskDecision, planStubs, readOptions, tokens } from './janitor'
 import type { Gate, JanitorOptions } from './janitor'
 import { fmtSaved, LEDGER_ROWS, ledgerRow, summarizeLedger } from './ledger'
 import { applyShape, charsCut, planShape } from './shape'
@@ -42,7 +42,7 @@ type Llm = {
   }
 }
 
-const MOD_VERSION = '0.5.1'
+const MOD_VERSION = '0.6.0'
 
 const SERVER = 'mcp-memory-service'
 
@@ -1204,6 +1204,8 @@ const reportInTq = async ($: CoreEngineInterface, live: JanitorLive, usedNow: Re
 export const register: Register = (on, options) => {
   const jo = readOptions(options)
   const gate: Gate = { isForced: false }
+  // How many agents the last deferred compaction waited for: logged once per change, not at every turn.
+  let agentWaitLogged: number | undefined
   let turnStart: Snap | undefined
   let lastPrompt: string | undefined
   let spent: Spent = { five: 0, seven: 0 }
@@ -1432,11 +1434,20 @@ export const register: Register = (on, options) => {
 
     if (e.agentId === undefined && !e.isAborted) {
       const cold = coldOwed
-      const step = cold ? 'compact' : decide(usage.context.tokens, jo, gate)
+      const due = cold ? 'compact' : decide(usage.context.tokens, jo, gate)
+      const busy = due === 'none' || cold ? [] : atWork(await $.agent.list().catch(() => []))
+      const step = cold ? due : boundaryStep(due, usage.context.tokens, busy.length, jo)
 
       coldOwed = false
 
-      if (step !== 'none') {
+      if (step === 'wait') {
+        if (agentWaitLogged !== busy.length) {
+          agentWaitLogged = busy.length
+          $.ui.log(`janitor: context ${k(usage.context.tokens ?? 0)} ≥ threshold ${k(jo.thresholdTokens)}, waiting for ${busy.length} agent(s) at work to report`)
+          await trace($, `compact deferred: ${busy.length} agent(s) at work — ${busy.map(a => a.description).join('; ').slice(0, 200)}`)
+        }
+      } else if (step !== 'none') {
+        agentWaitLogged = undefined
         gate.lastAttemptTokens = usage.context.tokens
 
         try {
@@ -1665,6 +1676,9 @@ export const register: Register = (on, options) => {
       }
     }
 
+    // The subagents so far, for the summary to keep what each one did.
+    const agentText = agentsNote(await $.agent.list().catch(() => []))
+
     // From here the report is owed whatever the engine does with the call.
     const owed: Pending = { trigger: `${e.trigger}${isActive ? '' : ', shadow mode'}`, archived: prepared?.count ?? 0, saved: prepared?.saved ?? 0 }
 
@@ -1698,7 +1712,7 @@ export const register: Register = (on, options) => {
 
       if (cut >= 2) {
         const head = base.slice(0, cut) as unknown as SnapMessage[]
-        const small = await smallSummary($, head, e.instructions)
+        const small = await smallSummary($, head, [e.instructions ?? '', agentText].filter(Boolean).join('\n\n'))
 
         if (small !== undefined) {
           const before = (await $.session.usage()).context.tokens
@@ -1736,9 +1750,9 @@ export const register: Register = (on, options) => {
     const input =
       prepared === undefined
         ? isActive
-          ? { ...e, instructions: instructionsFor(e.instructions) }
+          ? { ...e, instructions: instructionsFor(e.instructions, agentText) }
           : e
-        : { ...e, messages: prepared.messages, instructions: instructionsFor(e.instructions) }
+        : { ...e, messages: prepared.messages, instructions: instructionsFor(e.instructions, agentText) }
 
     const usageBefore = await $.session.usage().then(toSnap, () => undefined)
     let done: Awaited<ReturnType<typeof next>>

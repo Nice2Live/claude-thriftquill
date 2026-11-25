@@ -34,6 +34,7 @@ export type JanitorOptions = {
   snapshotOnCompact: boolean
   snapshotMemory: boolean
   compactionModel: CompactionModel
+  waitForAgents: boolean
 }
 
 export const DEFAULTS: JanitorOptions = {
@@ -55,6 +56,7 @@ export const DEFAULTS: JanitorOptions = {
   snapshotOnCompact: true,
   snapshotMemory: true,
   compactionModel: 'session',
+  waitForAgents: true,
 }
 
 const num = (v: unknown, fallback: number, min: number, max: number) =>
@@ -80,6 +82,7 @@ export const readOptions = (o: PluginOptions): JanitorOptions => ({
   snapshotOnCompact: o.snapshot_on_compact !== false,
   snapshotMemory: o.snapshot_memory !== false,
   compactionModel: o.compaction_model === 'compare' ? 'compare' : o.compaction_model === 'small' ? 'small' : 'session',
+  waitForAgents: o.wait_for_agents !== false,
 })
 
 export const tokens = (chars: number) => Math.ceil(chars / 4)
@@ -178,13 +181,49 @@ export const planStubs = (messages: readonly SessionMessage[], o: JanitorOptions
 }
 
 // What the summary is told to keep. The person's own `/compact` text, when there is one, goes first.
-export const instructionsFor = (own: string | undefined) =>
+export const instructionsFor = (own: string | undefined, agents = '') =>
   [
     own?.trim() ?? '',
     'Compaction priorities: (1) keep every request of the user and every decision with its reason; (2) keep the current task state, open TODOs, the files touched and why; (3) keep errors met and how they were fixed; (4) lines like "[archived: … full: <path>]" mark tool output stored on disk: keep the path of any output that may be needed again; (5) drop exploration noise, repeated listings and anything a file or the repository already holds.',
+    agents,
   ]
     .filter(Boolean)
     .join('\n\n')
+
+// ---- the session's subagents: a compaction waits for those still at work, and the summary keeps what each one did.
+export type AgentLite = { description: string; type: string; status: string }
+
+const AT_WORK = new Set(['pending', 'running', 'waiting'])
+
+export const atWork = <T extends AgentLite>(agents: readonly T[]): T[] => agents.filter(a => AT_WORK.has(a.status))
+
+// Past this share of the threshold the janitor compacts even with agents at work: the engine's own auto-compact, at the
+// window's edge, would not wait either.
+export const AGENT_WAIT_CEILING = 1.25
+
+// A compaction due at the end of a turn waits while agents of the session are at work: their reports come back in a
+// later turn, and the summary written then holds what they did. 'wait' leaves the gate as it is, so the next turn retries.
+export const boundaryStep = (
+  step: 'compact' | 'shadow' | 'none',
+  contextTokens: number | undefined,
+  busy: number,
+  o: Pick<JanitorOptions, 'waitForAgents' | 'thresholdTokens'>,
+): 'compact' | 'shadow' | 'none' | 'wait' =>
+  step === 'none' || !o.waitForAgents || busy === 0 || (contextTokens ?? 0) >= o.thresholdTokens * AGENT_WAIT_CEILING ? step : 'wait'
+
+// What the summary is told about the subagents, so the next stage still knows what the earlier agents of this one did.
+export const agentsNote = (agents: readonly AgentLite[]): string => {
+  if (agents.length === 0) {
+    return ''
+  }
+
+  const rows = agents.slice(-30).map(a => `- [${a.status}] ${a.type}: ${a.description.replace(/\s+/g, ' ').slice(0, 140)}`)
+
+  return [
+    'Subagents of this session (from the engine). In the summary keep, for each one: its task, what it found, changed or decided, the files and results it reported, and whether its work was used. Name every agent still running or pending, so its report is expected and not started again:',
+    ...rows,
+  ].join('\n')
+}
 
 export type Gate = { lastAttemptTokens?: number; isForced: boolean }
 
