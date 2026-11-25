@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { CoreEngineInterface, Register, SessionUsage } from 'claude-code'
 
-import { archivePath, boundaryStep, decide, describePlan, idleStep, instructionsFor, k, maskDecision, planStubs, readOptions, tokens } from './janitor'
+import { archivePath, boundaryStep, decide, dropReread, describePlan, idleStep, instructionsFor, k, maskDecision, planStubs, readOptions, tokens } from './janitor'
 import type { Gate, JanitorOptions } from './janitor'
 import { fmtSaved, LEDGER_ROWS, ledgerRow, summarizeLedger } from './ledger'
 import { applyShape, charsCut, planShape } from './shape'
@@ -44,7 +44,7 @@ type Llm = {
   }
 }
 
-const MOD_VERSION = '0.7.1'
+const MOD_VERSION = '0.10.0'
 
 const SERVER = 'mcp-memory-service'
 
@@ -462,6 +462,32 @@ export const dedupeSkills = (text: string, seen: Set<string>): string | null => 
   return fresh.length === 0 ? null : `${head}\n${fresh.join('\n')}`
 }
 
+// Skills cut from the listing by thriftquill/hide-skills.txt, one rule per line: `<name prefix> [unless <file>]`, e.g.
+// `unity: unless ProjectSettings/ProjectVersion.txt` lists the Unity skills only in a folder holding that file.
+export type SkillRule = { prefix: string; unless?: string }
+
+export const parseSkillRules = (text: string): SkillRule[] =>
+  text
+    .split('\n')
+    .map(l => l.trim())
+    .filter(l => l !== '' && !l.startsWith('#'))
+    .flatMap((l): SkillRule[] => {
+      const m = /^(\S+)(?:\s+unless\s+(\S+))?$/.exec(l)
+
+      return m === null ? [] : [m[2] === undefined ? { prefix: m[1]! } : { prefix: m[1]!, unless: m[2] }]
+    })
+
+export const hideSkills = (text: string, prefixes: readonly string[]): { text: string; hidden: number } => {
+  if (prefixes.length === 0) {
+    return { text, hidden: 0 }
+  }
+
+  const { head, blocks } = skillBlocks(text)
+  const kept = blocks.filter(b => !prefixes.some(p => b.replace(/^- /, '').startsWith(p)))
+
+  return kept.length === blocks.length ? { text, hidden: 0 } : { text: `${head}\n${kept.join('\n')}`, hidden: blocks.length - kept.length }
+}
+
 // The same for the deferred-tool notice: names already announced and not withdrawn since are cut from "now
 // available"; "no longer available" is kept whole and forgets its names. Text that does not parse passes as it is.
 export const dedupeDeferred = (text: string, known: Set<string>): string | null => {
@@ -765,7 +791,7 @@ type Flush = Mcp &
   Llm &
   EnvFs & {
     ui: { log: (text: string, options?: { to: 'debug' | 'transcript' }) => void }
-    session: { id: () => Promise<string>; messages: () => Promise<unknown>; usage: () => Promise<SessionUsage> }
+    session: { id: () => Promise<string>; messages: () => Promise<unknown>; usage: (args?: { breakdown?: 'summary' }) => Promise<SessionUsage> }
   }
 
 // A failure the person should hear of once per session and kind; the trace has every one of them.
@@ -803,7 +829,9 @@ const reportCompaction = async ($: Flush, jo: JanitorOptions, state: Relay, p: P
     }
   }
 
-  const size = `${p.before === undefined ? '' : `${k(p.before)} → `}${after === undefined ? '?' : k(after)} tokens`
+  // The engine's before/after count the conversation alone; the whole window adds the system prompt, tools and skills.
+  const whole = await $.session.usage({ breakdown: 'summary' }).then(u => u.context.breakdown?.totalTokens, () => undefined)
+  const size = `conversation ${p.before === undefined ? '' : `${k(p.before)} → `}${after === undefined ? '?' : k(after)} tokens${whole === undefined ? '' : `, whole context now ≈ ${k(whole)}`}`
 
   $.ui.log(`janitor: compaction (${p.trigger}): ${size}; stubs ${p.archived} (≈ −${k(p.saved)} in the summary input); ${memory.text}`)
 
@@ -904,17 +932,6 @@ export const anchorsFor = (jo: Pick<JanitorOptions, 'isHandoff' | 'anchors'>, ha
 
   return text === '' ? undefined : ({ id: 'thriftquill:protocol', scope: 'session', text } as const)
 }
-
-// The desktop app's task list (a card of steps under the answer), turned off by the setting task_list: the tool is not
-// offered, and this section, sent after the app's own, says so.
-export const PLAN_TOOL = 'mcp__ccd_turn__update_plan'
-
-export const NO_TASK_LIST = {
-  id: 'thriftquill:no-task-list',
-  scope: 'session',
-  text: `# Task list: off
-The user turned the task list off: ${PLAN_TOOL} is not available. Do not call it, search for it or restate a plan as a checklist; ignore any instruction to send or advance a plan. Everything else stays as described, including closing a turn with mcp__ccd_turn__wrap_up where it applies.`,
-} as const
 
 // ---- compaction by the small model, and its measurement (setting compaction_model)
 const compactionDir = async ($: Pick<EnvFs, 'env'>) => `${await claudeHome($)}/thriftquill/compactions`
@@ -1304,6 +1321,8 @@ export const register: Register = (on, options) => {
   let boundaryWaitLogged = false
   let turnStart: Snap | undefined
   let lastPrompt: string | undefined
+  // Open from a compaction to the end of the turn after it: the files the engine attaches again then (see dropReread).
+  let rereadOpen = false
   let spent: Spent = { five: 0, seven: 0 }
   let lastCall: number | undefined
   let stopTick: { cancel: () => void } | undefined
@@ -1325,9 +1344,8 @@ export const register: Register = (on, options) => {
 
     const composed = await next(e)
     const anchors = anchorsFor(jo, hasRelayRule(composed.sections))
-    const added = [anchors, jo.taskList ? undefined : NO_TASK_LIST].filter(x => x !== undefined)
 
-    return added.length === 0 ? composed : { sections: [...composed.sections, ...added] }
+    return anchors === undefined ? composed : { sections: [...composed.sections, anchors] }
   })
 
   on('session.start', async ($, e, next) => {
@@ -1522,6 +1540,10 @@ export const register: Register = (on, options) => {
   })
 
   on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      rereadOpen = false
+    }
+
     fired.complete++
 
     const usage = await $.session.usage()
@@ -1621,6 +1643,23 @@ export const register: Register = (on, options) => {
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) => {
     fired.attachment++
 
+    const rules = parseSkillRules(
+      await claudeHome($)
+        .then(home => $.fs.read(`${home}/thriftquill/hide-skills.txt`))
+        .catch(() => ''),
+    )
+
+    if (rules.length > 0) {
+      const cwd = await $.session.cwd().catch(() => '')
+      const here = await Promise.all(rules.map(r => (r.unless === undefined ? false : $.fs.read(`${cwd}/${r.unless}`).then(() => true, () => false))))
+      const cut = hideSkills(e.text, rules.filter((_, i) => !here[i]).map(r => r.prefix))
+
+      if (cut.hidden > 0) {
+        noteSaving('dedup', (e.text.length - cut.text.length) / 4, `${cut.hidden} skills hidden here`)
+        e = { ...e, text: cut.text }
+      }
+    }
+
     const text = dedupeSkills(e.text, seenBy(e.agentId).skills)
 
     if (text !== e.text) {
@@ -1663,7 +1702,16 @@ export const register: Register = (on, options) => {
   let rulesAt = 0
   let hotLoad: Promise<Set<string>> | undefined
 
-  on('tool.offer', { tool: PLAN_TOOL }, async ($, e, next) => (jo.taskList ? next(e) : { isOffered: false }))
+  // The files the engine attaches again after a compaction (see dropReread), until the turn after it ends.
+  on('prompt.attachment', { type: 'file' }, async (_$, e, next) => {
+    if (rereadOpen && !jo.reattachFiles && e.agentId === undefined && e.origin.kind === 'engine' && dropReread(e.text, lastPrompt ?? '')) {
+      noteSaving('reread', e.text.length / 4, 'file attached again after a compaction')
+
+      return { text: null }
+    }
+
+    return next(e)
+  })
 
   on('tool.describe', async ($, e, next) => {
     fired.describe++
@@ -1897,6 +1945,7 @@ export const register: Register = (on, options) => {
           }
 
           seen.delete('main')
+          rereadOpen = true
           gate.lastAttemptTokens = after
           pending = { ...owed, before, after, summary: small.text }
           await keepPending($, pending).catch(() => undefined)
@@ -1925,7 +1974,7 @@ export const register: Register = (on, options) => {
       throw err
     }
 
-    await trace($, `compact: next returned skip=${done.skip ?? 'no'} before=${('tokensBefore' in done ? done.tokensBefore : undefined) ?? '?'} after=${('tokensAfter' in done ? done.tokensAfter : undefined) ?? '?'} messages=${done.messages?.length ?? '?'}`)
+    await trace($, `compact: next returned skip=${done.skip ?? 'no'} conversation before=${('tokensBefore' in done ? done.tokensBefore : undefined) ?? '?'} after=${('tokensAfter' in done ? done.tokensAfter : undefined) ?? '?'} messages=${done.messages?.length ?? '?'}`)
 
     if (done.skip !== undefined) {
       pending = undefined
@@ -1939,6 +1988,7 @@ export const register: Register = (on, options) => {
     }
 
     seen.delete('main')
+    rereadOpen = true
     gate.lastAttemptTokens = done.tokensAfter
     // What the compaction itself cost the windows, counted into the running total like an answer.
     const usageAfter = await $.session.usage().then(toSnap, () => undefined)

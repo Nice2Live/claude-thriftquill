@@ -11,12 +11,14 @@ import {
   fmtSpend,
   fmtToolSizes,
   handoffBody,
+  hideSkills,
   hideTools,
   hotTools,
   isUnreachable,
   keepPending,
   ownHandoffHash,
   parseDeferRules,
+  parseSkillRules,
   redact,
   relayBlock,
   rise,
@@ -334,4 +336,18 @@ test('/janitor doctor names the mode, the rules and the hooks that ran', async (
   expect(doctor).toContain('thriftquill v')
   expect(doctor).toContain('hooks that ran this session')
   expect(doctor).toContain('own triggers off')
+})
+
+test('hide-skills.txt: a prefix cuts its skills from the listing, with or without the file that keeps them', () => {
+  expect(parseSkillRules('# note\nunity: unless ProjectSettings/ProjectVersion.txt\nb:\n\nbad rule here')).toEqual([
+    { prefix: 'unity:', unless: 'ProjectSettings/ProjectVersion.txt' },
+    { prefix: 'b:' },
+  ])
+
+  const cut = hideSkills(SKILLS, ['b:'])
+
+  expect(cut.hidden).toEqual(1)
+  expect(cut.text).toContain('- a:one')
+  expect(cut.text).not.toContain('continued line')
+  expect(hideSkills(SKILLS, [])).toEqual({ text: SKILLS, hidden: 0 })
 })

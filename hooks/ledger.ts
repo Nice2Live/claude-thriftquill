@@ -2,7 +2,7 @@
 // Only what the mod itself caused is added up. 'stub' is the compaction input it cut, 'dedup' the repeated listings it did
 // not resend. 'defer' is how much tool schema is out of the prompt at session start; the engine's own tool search is in
 // that figure too, so it is shown on its own and never added to the total.
-export type LedgerKind = 'stub' | 'dedup' | 'shape' | 'defer'
+export type LedgerKind = 'stub' | 'dedup' | 'shape' | 'defer' | 'reread'
 
 export type LedgerRow = { t: string; kind: LedgerKind; tokens: number; note?: string }
 

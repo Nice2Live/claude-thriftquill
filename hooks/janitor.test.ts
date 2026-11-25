@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { boundaryStep, DEFAULTS, decide, describePlan, idleStep, instructionsFor, planStubs, maskDecision, readOptions, stubText } from './janitor'
+import { boundaryStep, DEFAULTS, dropReread, decide, describePlan, idleStep, instructionsFor, planStubs, maskDecision, readOptions, stubText } from './janitor'
 
 const BIG = 'first line of output\n' + 'x'.repeat(8000)
 const OPTS = { ...DEFAULTS, ownTriggers: true, keepRecentMessages: 2, stubMinChars: 2000, idleMode: 'active' as const }
@@ -179,4 +179,14 @@ test('boundaryStep: past the threshold a compaction waits for a stage end, up to
   expect(readOptions({ boundary_window_tokens: 0 }).boundaryWindowTokens).toEqual(0)
   expect(readOptions({ boundary_window_tokens: 999999 }).boundaryWindowTokens).toEqual(300000)
   expect(instructionsFor(undefined, 'EXTRA')).toContain('EXTRA')
+})
+
+test('dropReread: a file attached again after a compaction stays only when the message names it', () => {
+  const text = 'Called the Read tool with the following input: {"file_path":"C:\\Users\\x\\hooks\\worklog.test.ts"}\nResult: ...'
+
+  expect(dropReread(text, 'how did the compaction go?')).toEqual(true)
+  expect(dropReread(text, 'look at @hooks/worklog.test.ts again')).toEqual(false)
+  expect(dropReread('a file without a read call', '')).toEqual(false)
+  expect(readOptions({}).reattachFiles).toEqual(false)
+  expect(readOptions({ reattach_files: true }).reattachFiles).toEqual(true)
 })

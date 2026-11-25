@@ -1,6 +1,6 @@
 {
   "name": "thriftquill",
-  "version": "0.7.1",
+  "version": "0.10.0",
   "description": "Saves tokens and limits: archives big old tool output before a compaction, compacts while the prompt cache is still warm, stops repeated skill and tool listings from being resent, moves tool descriptions behind ToolSearch, and takes context snapshots you can restore in another chat",
   "author": {
     "name": "Artyom"
@@ -158,11 +158,11 @@
       ],
       "default": "session"
     },
-    "task_list": {
+    "reattach_files": {
       "type": "boolean",
-      "title": "Task list card (desktop app)",
-      "description": "On (default): the desktop app's step list under the answer works as the app sets it up. Off: the step-list tool is hidden from the model and the system prompt says the list is off; the closing next-step box (wrap_up) stays.",
-      "default": true
+      "title": "Attach recently read files again after a compaction",
+      "description": "Off (default): the files the engine attaches again after a compaction (the last ones the model read) are left out unless your message names them; the model reads a file again when it needs it. On: the engine's behaviour.",
+      "default": false
     }
   },
   "license": "MIT",

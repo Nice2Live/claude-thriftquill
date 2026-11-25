@@ -35,7 +35,7 @@ export type JanitorOptions = {
   snapshotMemory: boolean
   compactionModel: CompactionModel
   boundaryWindowTokens: number
-  taskList: boolean
+  reattachFiles: boolean
 }
 
 export const DEFAULTS: JanitorOptions = {
@@ -58,7 +58,7 @@ export const DEFAULTS: JanitorOptions = {
   snapshotMemory: true,
   compactionModel: 'session',
   boundaryWindowTokens: 70000,
-  taskList: true,
+  reattachFiles: false,
 }
 
 const num = (v: unknown, fallback: number, min: number, max: number) =>
@@ -85,7 +85,7 @@ export const readOptions = (o: PluginOptions): JanitorOptions => ({
   snapshotMemory: o.snapshot_memory !== false,
   compactionModel: o.compaction_model === 'compare' ? 'compare' : o.compaction_model === 'small' ? 'small' : 'session',
   boundaryWindowTokens: num(o.boundary_window_tokens, DEFAULTS.boundaryWindowTokens, 0, 300000),
-  taskList: o.task_list !== false,
+  reattachFiles: o.reattach_files === true,
 })
 
 export const tokens = (chars: number) => Math.ceil(chars / 4)
@@ -245,4 +245,24 @@ export const describePlan = (plan: Plan, contextTokens: number | undefined) => {
   return plan.archives.length === 0
     ? `janitor: nothing to trim${contextTokens === undefined ? '' : ` (context ${k(contextTokens)})`}`
     : `janitor: can trim ~${k(plan.savedTokens)} tokens, ${plan.archives.length} fragments (${top})${contextTokens === undefined ? '' : `; context ${k(contextTokens)}`}`
+}
+
+// After a compaction the engine attaches again the files the model read last (a `file` attachment framed as a Read
+// call). One is left out unless the person's message names it: the model reads a file again when it needs it.
+export const rereadPath = (text: string): string | undefined => {
+  const m = /"file_path"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(text)
+
+  return m?.[1]?.replace(/\\\\/g, '\\')
+}
+
+export const dropReread = (text: string, prompt: string): boolean => {
+  const path = rereadPath(text)
+
+  if (path === undefined) {
+    return false
+  }
+
+  const base = path.split(/[\\/]/).pop() ?? ''
+
+  return base === '' || !prompt.includes(base)
 }

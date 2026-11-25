@@ -44,6 +44,12 @@ Turn on "Start compactions myself" (`own_triggers`) with Janitor mode `active`, 
 
 The mod keeps, outside the conversation, what the conversation handed off and what came back: each subagent (its task and its report), background commands, monitors and workflows, and the task notifications. Long reports are saved whole to `~/.claude/thriftquill/worklog/` and condensed by the small model (one call per report over 2000 characters). After every compaction (the janitor's, the engine's auto-compact, a `/compact`) the log of the current stage goes back to the model with the next message, and the summary is told to keep it, so a stage spread over agents is not forgotten halfway. A stage closes when it ends (as above); finished items then stay only as titles. Thriftquill pane → Reports → Work log shows it.
 
+## Less in the context
+
+- **Files attached again after a compaction.** The engine re-attaches the files the model read last. With `reattach_files` off (default) they are left out unless your message names them; the model reads a file again when it needs it.
+- **`~/.claude/thriftquill/hide-tools.txt`**: one MCP prefix per line (`mcp__acme__`). Those deferred tools leave the "now available" notice and one line says how to find them; they stay callable.
+- **`~/.claude/thriftquill/hide-skills.txt`**: `<skill prefix> [unless <file>]` per line, e.g. `unity: unless ProjectSettings/ProjectVersion.txt` lists the Unity skills only in a Unity project.
+
 ## Compaction by the small model (experimental)
 
 Setting `compaction_model`:
